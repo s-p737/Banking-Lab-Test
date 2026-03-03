@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import matplotlib.dates as mdates
+
+# =====================================================
+# 1. PATHS
+# =====================================================
+panel_path = "/zfs/data/bankcallreports/raw/current/data/panel_full_all_quarters.csv"
+base_out_dir = "/zfs/data/bankcallreports/raw/current/data/qc_outputs"
+out_dir = f"{base_out_dir}/journal_figures"
+os.makedirs(out_dir, exist_ok=True)
+
+# =====================================================
+# 2. LOAD DATA
+# =====================================================
+df = pd.read_csv(panel_path, low_memory=False)
+
+required_cols = ["quarter_code", "idrssd", "asset_diff", "assets"]
+for col in required_cols:
+    if col not in df.columns:
+        raise ValueError(f"{col} not found in dataset.")
+
+for col in ["asset_diff", "assets"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.dropna(subset=["quarter_code", "idrssd", "asset_diff", "assets"])
+
+# =====================================================
+# 3. CLEAN DATA
+# =====================================================
+df = df[df["assets"].abs() > 1e3]
+
+df["prop_error"] = df["asset_diff"] / df["assets"]
+
+lower = df["prop_error"].quantile(0.001)
+upper = df["prop_error"].quantile(0.999)
+df = df[(df["prop_error"] >= lower) & (df["prop_error"] <= upper)]
+
+# =====================================================
+# 4. CONVERT QUARTER CODE → DATETIME
+# =====================================================
+def quarter_code_to_datetime(qc):
+    qc = str(int(qc)).zfill(6)  # pad to 6 digits: MMDDYY
+    return pd.to_datetime(qc, format="%m%d%y")
+
+df["date"] = df["quarter_code"].apply(quarter_code_to_datetime)
+df = df.sort_values("date")
+
+# =====================================================
+# 5. TIME SERIES 1
+# Average proportional error by quarter
+# =====================================================
+quarter_avg = df.groupby("date")["prop_error"].mean().reset_index()
+quarter_avg["prop_error_pct"] = quarter_avg["prop_error"] * 100
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(quarter_avg["date"], quarter_avg["prop_error_pct"], linewidth=1.5)
+ax.axhline(0, linestyle="--", linewidth=1)
+ax.set_title("Average Proportional Asset Error", fontsize=14, pad=15)
+ax.set_ylabel("Percent")
+ax.set_xlabel("")
+ax.yaxis.set_major_locator(plt.MaxNLocator(6))
+ax.yaxis.set_major_formatter(lambda x, _: f"{x:.2f}%")
+ax.xaxis.set_major_locator(mdates.YearLocator(6))
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+plt.tight_layout(pad=2)
+plt.savefig(f"{out_dir}/figure1_avg_prop_error.png", dpi=300)
+plt.close()
+
+# =====================================================
+# 6. TIME SERIES 2
+# Share of banks with |error| > 1%
+# =====================================================
+df["large_error"] = df["prop_error"].abs() > 0.01
+quarter_share = df.groupby("date")["large_error"].mean().reset_index()
+quarter_share["share_pct"] = quarter_share["large_error"] * 100
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(quarter_share["date"], quarter_share["share_pct"], linewidth=1.5)
+ax.set_title("Share of Banks with |Proportional Error| > 1%", fontsize=14, pad=15)
+ax.set_ylabel("Percent of Banks")
+ax.set_xlabel("")
+ax.yaxis.set_major_locator(plt.MaxNLocator(6))
+ax.yaxis.set_major_formatter(lambda x, _: f"{x:.0f}%")
+ax.xaxis.set_major_locator(mdates.YearLocator(6))
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+plt.tight_layout(pad=2)
+plt.savefig(f"{out_dir}/figure2_share_large_error.png", dpi=300)
+plt.close()
+
+# =====================================================
+# 7. DECILE FIGURE
+# =====================================================
+bank_level = (
+    df.groupby("idrssd")
+    .agg(
+        bank_avg_prop_error=("prop_error", "mean"),
+        avg_assets=("assets", "mean"),
+    )
+    .reset_index()
+)
+
+bank_level["asset_decile"] = pd.qcut(
+    bank_level["avg_assets"], q=10, labels=range(1, 11)
+)
+
+decile_avg = (
+    bank_level.groupby("asset_decile")["bank_avg_prop_error"]
+    .mean()
+    .reset_index()
+)
+decile_avg["prop_error_pct"] = decile_avg["bank_avg_prop_error"] * 100
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(decile_avg["asset_decile"], decile_avg["prop_error_pct"], marker="o", linewidth=1.5)
+ax.axhline(0, linestyle="--", linewidth=1)
+ax.set_title("Average Proportional Error by Asset Size Decile", fontsize=14, pad=15)
+ax.set_xlabel("Asset Size Decile (1 = Smallest)")
+ax.set_ylabel("Percent")
+ax.set_xticks(range(1, 11))
+ax.yaxis.set_major_locator(plt.MaxNLocator(6))
+ax.yaxis.set_major_formatter(lambda x, _: f"{x:.2f}%")
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+plt.tight_layout(pad=2)
+plt.savefig(f"{out_dir}/figure3_decile_error.png", dpi=300)
+plt.close()
+
+# =====================================================
+# DONE
+# =====================================================
+print("Journal-quality figures saved to:")
+print(out_dir)
